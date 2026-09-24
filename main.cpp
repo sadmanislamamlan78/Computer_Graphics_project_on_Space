@@ -1,11 +1,12 @@
 /* =========================================================================
- *  SPACE SHOOTER  +  SOLAR SYSTEM  (one project, two modes)
+ *  SPACE SHOOTER  +  SOLAR SYSTEM  (one project, three modes)
  *  -----------------------------------------------------------------------
  *  This file merges two previously-separate GLUT programs into one:
  *
  *    1. SPACE SHOOTER - the original 2D two-player game
  *    2. SOLAR SYSTEM  - a 3D solar system viewer (planets, moon, rings,
  *       asteroid belt, a roaming rocket, mouse-look camera).
+ *    3.Rocket Simulation Game
  *
  *  You reach the Solar System from the main menu ("Solar System" button,
  *  next to "Start Game"). From inside it, ESC or Q returns to the menu
