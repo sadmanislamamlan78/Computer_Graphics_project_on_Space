@@ -372,6 +372,11 @@ static const float CAM_DEFAULT_PITCH = -29.0f;
 static const float CAM_DEFAULT_FOV   = 55.0f;
 
 static int solarPaused = 0;
+/* Procedural surface maps keep the project self-contained while giving every
+   planet a distinct visual language. */
+static GLuint planetTextures[PLANET_COUNT] = {0};
+static GLuint earthCloudTexture = 0;
+static GLUquadric *planetTextureQuadric = NULL;
 
 /* Drives both the sun's glow alpha and GL_LIGHT0's intensity each
    frame, so the "dynamic lighting" is one coherent effect rather
@@ -501,6 +506,207 @@ static void drawRing(float innerRadius, float outerRadius, const float *color)
     }
     glEnd();
 }
+static float textureNoise(float longitude, float latitude, float scale)
+{
+    return 0.5f + 0.5f * sinf(longitude * scale + sinf(latitude * scale * 0.73f) * 1.7f);
+}
+
+static void setTexturePixel(unsigned char *pixels, int index, float red, float green, float blue)
+{
+    pixels[index + 0] = (unsigned char)(fmaxf(0.0f, fminf(255.0f, red * 255.0f)));
+    pixels[index + 1] = (unsigned char)(fmaxf(0.0f, fminf(255.0f, green * 255.0f)));
+    pixels[index + 2] = (unsigned char)(fmaxf(0.0f, fminf(255.0f, blue * 255.0f)));
+}
+
+static void createPlanetTexture(int planetIndex)
+{
+    const int width = 256;
+    const int height = 128;
+    unsigned char pixels[width * height * 3];
+
+    for(int y = 0; y < height; y++)
+    {
+        float latitude = ((float)y / (float)(height - 1)) * 2.0f - 1.0f;
+
+        for(int x = 0; x < width; x++)
+        {
+            float longitude = ((float)x / (float)width) * 2.0f - 1.0f;
+            float red = 0.5f, green = 0.5f, blue = 0.5f;
+            float noise = textureNoise(longitude, latitude, 18.0f);
+
+            if(planetIndex == P_MERCURY)
+            {
+                float craterField = 0.5f + 0.5f * sinf(longitude * 48.0f + sinf(latitude * 25.0f) * 4.0f);
+                float crater = craterField > 0.92f ? 0.20f : 0.0f;
+                red = 0.28f + noise * 0.18f + crater;
+                green = 0.27f + noise * 0.17f + crater;
+                blue = 0.25f + noise * 0.15f + crater;
+                if(fabsf(latitude) > 0.84f) red += 0.08f, green += 0.08f, blue += 0.08f;
+            }
+            else if(planetIndex == P_VENUS)
+            {
+                float haze = 0.5f + 0.5f * sinf(latitude * 22.0f + noise * 3.0f);
+                red = 0.78f + haze * 0.17f;
+                green = 0.62f + haze * 0.20f;
+                blue = 0.30f + haze * 0.20f;
+            }
+            else if(planetIndex == P_EARTH)
+            {
+                float continentA = 1.0f - (fabsf(longitude + 0.48f) * 1.35f + fabsf(latitude - 0.18f) * 1.75f);
+                float continentB = 1.0f - (fabsf(longitude - 0.18f) * 1.10f + fabsf(latitude + 0.05f) * 1.45f);
+                float continentC = 1.0f - (fabsf(longitude - 0.62f) * 1.55f + fabsf(latitude + 0.48f) * 1.35f);
+                float land = fmaxf(continentA, fmaxf(continentB, continentC));
+                if(land > 0.18f)
+                {
+                    float vegetation = fminf(1.0f, (land - 0.18f) * 2.0f);
+                    red = 0.08f + 0.18f * vegetation + noise * 0.10f;
+                    green = 0.28f + 0.40f * vegetation + noise * 0.12f;
+                    blue = 0.12f + 0.12f * vegetation;
+                }
+                else
+                {
+                    red = 0.02f + noise * 0.04f;
+                    green = 0.18f + noise * 0.08f;
+                    blue = 0.55f + noise * 0.18f;
+                }
+                float clouds = 0.5f + 0.5f * sinf(longitude * 15.0f + sinf(latitude * 31.0f) * 2.0f);
+                if(clouds > 0.87f) red = red * 0.45f + 0.55f, green = green * 0.45f + 0.55f, blue = blue * 0.45f + 0.55f;
+                if(fabsf(latitude) > 0.86f) red = 0.78f, green = 0.86f, blue = 0.92f;
+            }
+            else if(planetIndex == P_MARS)
+            {
+                float basalt = 0.5f + 0.5f * sinf(longitude * 10.0f + latitude * 19.0f);
+                red = 0.55f + noise * 0.23f - basalt * 0.13f;
+                green = 0.16f + noise * 0.10f - basalt * 0.04f;
+                blue = 0.07f + noise * 0.05f;
+                if(fabsf(latitude) > 0.84f) red = 0.88f, green = 0.86f, blue = 0.78f;
+                if(fabsf(latitude) < 0.12f && fabsf(longitude) < 0.62f) red *= 0.55f, green *= 0.60f, blue *= 0.65f;
+            }
+            else if(planetIndex == P_JUPITER)
+            {
+                float bands = 0.5f + 0.5f * sinf(latitude * 42.0f + noise * 2.0f);
+                red = 0.72f + bands * 0.20f;
+                green = 0.48f + bands * 0.25f;
+                blue = 0.28f + bands * 0.25f;
+                float stormX = (longitude + 0.38f) / 0.24f;
+                float stormY = (latitude + 0.25f) / 0.13f;
+                if(stormX * stormX + stormY * stormY < 1.0f) red = 0.65f, green = 0.12f, blue = 0.06f;
+            }
+            else if(planetIndex == P_SATURN)
+            {
+                float bands = 0.5f + 0.5f * sinf(latitude * 25.0f + noise * 1.4f);
+                red = 0.72f + bands * 0.18f;
+                green = 0.60f + bands * 0.18f;
+                blue = 0.36f + bands * 0.18f;
+            }
+            else if(planetIndex == P_URANUS)
+            {
+                red = 0.28f + noise * 0.035f;
+                green = 0.70f + noise * 0.06f;
+                blue = 0.78f + noise * 0.08f;
+            }
+            else if(planetIndex == P_NEPTUNE)
+            {
+                float streaks = 0.5f + 0.5f * sinf(longitude * 28.0f + latitude * 8.0f);
+                red = 0.03f + streaks * 0.05f;
+                green = 0.12f + streaks * 0.16f;
+                blue = 0.52f + streaks * 0.28f;
+                float spotX = (longitude - 0.30f) / 0.19f;
+                float spotY = (latitude + 0.18f) / 0.12f;
+                if(spotX * spotX + spotY * spotY < 1.0f) red = 0.015f, green = 0.04f, blue = 0.18f;
+                if(streaks > 0.94f) red = 0.72f, green = 0.82f, blue = 0.92f;
+            }
+            else if(planetIndex == P_PLUTO)
+            {
+                float heartX = longitude * 1.65f;
+                float heartY = latitude * 1.65f;
+                float heart = heartX * heartX + heartY * heartY - 1.0f;
+                bool inHeart = heart * heart * heart - heartX * heartX * heartY * heartY * heartY <= 0.0f && heartY > -0.55f;
+                if(inHeart) red = 0.88f, green = 0.74f, blue = 0.72f;
+                else if(noise > 0.56f) red = 0.22f + noise * 0.16f, green = 0.23f + noise * 0.15f, blue = 0.25f + noise * 0.14f;
+                else red = 0.60f + noise * 0.20f, green = 0.57f + noise * 0.18f, blue = 0.52f + noise * 0.17f;
+            }
+
+            int index = (y * width + x) * 3;
+            setTexturePixel(pixels, index, red, green, blue);
+        }
+    }
+
+    glGenTextures(1, &planetTextures[planetIndex]);
+    glBindTexture(GL_TEXTURE_2D, planetTextures[planetIndex]);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0,
+                 GL_RGB, GL_UNSIGNED_BYTE, pixels);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+static void drawPlanetSurface(const Planet *p)
+{
+    if(planetTextures[p - planets] == 0 || planetTextureQuadric == NULL)
+    {
+        glutSolidSphere(p->size, p->isMoon ? 16 : 26, p->isMoon ? 10 : 16);
+        return;
+    }
+
+    glEnable(GL_TEXTURE_2D);
+    glBindTexture(GL_TEXTURE_2D, planetTextures[p - planets]);
+    glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    glColor3f(1.0f, 1.0f, 1.0f);
+    gluSphere(planetTextureQuadric, p->size, 36, 24);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glDisable(GL_TEXTURE_2D);
+
+    if(p->name[0] == 'E' && p->name[1] == 'a' && p->name[2] == 'r' && earthCloudTexture != 0)
+    {
+        glDepthMask(GL_FALSE);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, earthCloudTexture);
+        glColor4f(1.0f, 1.0f, 1.0f, 0.82f);
+        gluSphere(planetTextureQuadric, p->size * 1.008f, 36, 24);
+        glBindTexture(GL_TEXTURE_2D, 0);
+        glDisable(GL_TEXTURE_2D);
+        glDisable(GL_BLEND);
+        glDepthMask(GL_TRUE);
+    }
+}
+
+static void createEarthCloudTexture(void)
+{
+    const int width = 256;
+    const int height = 128;
+    unsigned char pixels[width * height * 4];
+
+    for(int y = 0; y < height; y++)
+    {
+        float latitude = ((float)y / (float)(height - 1)) * 2.0f - 1.0f;
+        for(int x = 0; x < width; x++)
+        {
+            float longitude = ((float)x / (float)width) * 2.0f - 1.0f;
+            float cloudField = 0.5f + 0.5f * sinf(longitude * 17.0f + sinf(latitude * 29.0f) * 2.5f);
+            cloudField += 0.22f * (0.5f + 0.5f * sinf(longitude * 43.0f - latitude * 11.0f));
+            int index = (y * width + x) * 4;
+            pixels[index + 0] = 255;
+            pixels[index + 1] = 255;
+            pixels[index + 2] = 255;
+            pixels[index + 3] = cloudField > 0.86f ? (unsigned char)(150.0f + cloudField * 80.0f) : 0;
+        }
+    }
+
+    glGenTextures(1, &earthCloudTexture);
+    glBindTexture(GL_TEXTURE_2D, earthCloudTexture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
 
 static void updatePlanetPosition(Planet *p)
 {
@@ -600,7 +806,10 @@ static void drawPlanet(const Planet *p)
         glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, specular);
         glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 18.0f);
 
-        glutSolidSphere(p->size, p->isMoon ? 16 : 26, p->isMoon ? 10 : 16);
+        if(p->isMoon)
+            glutSolidSphere(p->size, 16, 10);
+        else
+            drawPlanetSurface(p);
     }
 
     if(p->hasRing)
@@ -1101,6 +1310,16 @@ static void rocketDrawAt(float x, float y, float z,
 static void solarSystemInit(void)
 {
     glEnable(GL_NORMALIZE); /* the rocket is uniformly scaled by ROCKET_SCALE */
+    planetTextureQuadric = gluNewQuadric();
+    if(planetTextureQuadric != NULL)
+    {
+        gluQuadricNormals(planetTextureQuadric, GLU_SMOOTH);
+        gluQuadricTexture(planetTextureQuadric, GL_TRUE);
+        for(int i = P_MERCURY; i < PLANET_COUNT; i++)
+            if(!planets[i].isMoon)
+                createPlanetTexture(i);
+        createEarthCloudTexture();
+    }
 
     GLfloat mat_specular[]   = { 1.0f, 1.0f, 1.0f, 1.0f };
     GLfloat light_position[] = { 0.0f, 0.0f, 0.0f, 1.0f }; /* at the sun */
