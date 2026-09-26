@@ -353,9 +353,10 @@ typedef struct
 {
     float x, y, z;
     float yaw, pitch;
-    float fov;
-    float targetFov;
-    float velocityX, velocityZ;
+    float fov;         /* current field of view, eased toward targetFov each frame */
+    float targetFov;   /* where W/S want the fov to end up - see solarCameraOperations() */
+    float velocityX, velocityZ; /* current drift speed from A/D/J/L, damped each frame
+                                    so the camera glides to a stop instead of snapping */
 
     int locked;      /* -1 = free, else index into planets[] */
 
@@ -509,11 +510,54 @@ static void drawRing(float innerRadius, float outerRadius, const float *color)
     }
     glEnd();
 }
+/* =========================================================================
+ * PLANET SURFACE TEXTURES
+ * -------------------------------------------------------------------------
+ * glutSolidSphere() (used elsewhere in this file for untextured spheres)
+ * does not generate texture coordinates, so it can't be textured reliably.
+ * Every textured planet is instead drawn with gluSphere() on a GLU quadric
+ * that has gluQuadricTexture(..., GL_TRUE) turned on (see
+ * planetTextureQuadric in solarSystemInit()), which DOES generate correct
+ * (longitude, latitude) texture coordinates across the sphere.
+ *
+ * Each texture is generated once, procedurally, at startup - no image
+ * files are loaded, keeping the project a single self-contained .cpp.
+ * The generator is one function (createPlanetTexture) with a per-planet
+ * if/else chain, each branch painting a 256x128 RGB buffer pixel by pixel
+ * using cheap closed-form math (sine-wave "noise", distance-from-a-point
+ * tests for storms/craters/ice caps) rather than a real noise library:
+ *   Mercury - grey base + a sparse field of darker circular craters
+ *   Venus   - yellow/beige haze banded by latitude (thick cloud layers)
+ *   Earth   - blue ocean, green/brown continents, white cloud streaks and
+ *             polar ice caps (also gets a separate semi-transparent cloud
+ *             shell - see createEarthCloudTexture())
+ *   Mars    - rusty red/orange with darker basalt streaks and a pale
+ *             equatorial plain
+ *   Jupiter - horizontal tan/brown bands (interpolated by latitude) plus
+ *             one reddish "storm" ellipse
+ *   Saturn  - the same horizontal-band technique in paler gold tones
+ *   Uranus  - almost flat pale cyan (Uranus is famously nearly featureless)
+ *   Neptune - deep blue diagonal streaks plus a dark storm spot and a
+ *             band of high white clouds
+ *   Pluto   - mottled grey/tan icy surface with a pale heart-shaped patch
+ *             (a nod to the real Tombaugh Regio)
+ * The Sun and Moon are deliberately left out of this loop (see the loop
+ * condition in solarSystemInit()): the Sun is always drawn as a flat
+ * emissive color plus its own glow shells (see drawPlanet()), and the
+ * Moon stays a plain glutSolidSphere() for simplicity, since it's small
+ * enough on screen that surface detail wouldn't read anyway.
+ * ========================================================================= */
+
+// A cheap, repeatable pseudo-noise value in [0,1] for adding surface
+// variation without a real noise library: two sine waves, one nested
+// inside the other's phase, so it doesn't look like plain regular stripes.
 static float textureNoise(float longitude, float latitude, float scale)
 {
     return 0.5f + 0.5f * sinf(longitude * scale + sinf(latitude * scale * 0.73f) * 1.7f);
 }
 
+// Writes one RGB texel into a raw pixel buffer, converting each 0..1 float
+// channel to a clamped 0..255 byte (glTexImage2D wants bytes, not floats).
 static void setTexturePixel(unsigned char *pixels, int index, float red, float green, float blue)
 {
     pixels[index + 0] = (unsigned char)(fmaxf(0.0f, fminf(255.0f, red * 255.0f)));
@@ -521,6 +565,14 @@ static void setTexturePixel(unsigned char *pixels, int index, float red, float g
     pixels[index + 2] = (unsigned char)(fmaxf(0.0f, fminf(255.0f, blue * 255.0f)));
 }
 
+// Builds and uploads the 256x128 procedural surface texture for one planet
+// (planetIndex is one of the P_* enum values). "pixels" is a local
+// stack array (256*128*3 = 96KB) rather than a heap allocation - safe
+// here since this only ever runs once per planet during startup, not in
+// the per-frame render loop, so the large stack frame is short-lived.
+// longitude/latitude below both run -1..1 across the texture (not real
+// radians), just a convenient normalized coordinate for the per-planet
+// pattern math.
 static void createPlanetTexture(int planetIndex)
 {
     const int width = 256;
@@ -646,6 +698,18 @@ static void createPlanetTexture(int planetIndex)
     glBindTexture(GL_TEXTURE_2D, 0);
 }
 
+// Draws one planet's textured sphere, falling back to a plain
+// glutSolidSphere() if its texture failed to generate (texture ID 0) or
+// the quadric wasn't created. Called from drawPlanet() AFTER it has
+// already set the planet's ambient/diffuse/specular material from
+// p->color - that diffuse color is deliberately overwritten here by
+// glColor3f(1,1,1): solarSystemInit() enabled GL_COLOR_MATERIAL for
+// GL_FRONT/GL_DIFFUSE, which makes every glColor3f() call ALSO set the
+// current diffuse material. Setting it to white here, combined with
+// GL_MODULATE (the default texture blend mode, set explicitly below),
+// means the final pixel color is texture_color * white = the texture's
+// true colors, undistorted by whatever flat p->color the non-textured
+// fallback sphere would have used.
 static void drawPlanetSurface(const Planet *p)
 {
     if(planetTextures[p - planets] == 0 || planetTextureQuadric == NULL)
@@ -678,6 +742,12 @@ static void drawPlanetSurface(const Planet *p)
     }
 }
 
+// A second, separate RGBA texture for Earth only: a mostly-transparent
+// layer of white cloud wisps (alpha=0 everywhere except where the noise
+// field crosses a threshold), drawn as a slightly larger sphere on top of
+// Earth's surface texture in drawPlanetSurface() with alpha blending.
+// Two independent noise fields at different frequencies are summed so the
+// clouds don't look like one uniform repeating pattern.
 static void createEarthCloudTexture(void)
 {
     const int width = 256;
@@ -1416,6 +1486,19 @@ static void solarSetCamera(void)
               0.0, 1.0, 0.0);
 }
 
+// Called every frame (from keyOperations(), only while viewPage == SOLAR)
+// to turn held keys into smooth camera motion instead of instant jumps:
+//   - W/S don't change fov directly; they nudge targetFov, and fov eases
+//     toward it each frame (cam.fov += (target - fov) * 0.18), giving a
+//     gradual zoom instead of a snap.
+//   - A/D (strafe) and J/L (forward/back) don't move the camera directly
+//     either; they add to cam.velocityX/Z (accelerate), which is clamped
+//     to maxSpeed and multiplied by damping (0.78) every frame whether or
+//     not a key is held - so releasing the key lets the camera coast to a
+//     stop rather than stopping dead, like inertia.
+// None of this applies while the camera is locked onto a planet (see
+// cam.locked): panning/strafing would fight the fixed follow-cam, so only
+// the fov zoom still works and velocity is reset to zero.
 static void solarCameraOperations(void)
 {
     const float fovStep = 0.75f;
@@ -1878,8 +1961,6 @@ static void rocketSimFrame(void)
     rocketSimHudOverlay();
 }
 
-// 'r' resets the ship; 'q'/'Q'/Esc returns to the menu. Thrust, brake, and
-// turning are all polled directly out of keyStates[]/specialKeyStates[] in
 // 'r' resets the ship (and missions/lights with it); 'q'/'Q'/Esc returns to
 // the menu; '1'/'2'/'3' individually toggle each beacon light. Thrust,
 // brake, and turning are all polled directly out of keyStates[]/
