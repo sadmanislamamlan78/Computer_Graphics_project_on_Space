@@ -43,6 +43,7 @@
  *    Hold + drag mouse : look around
  *    w / s              : zoom in / out (field of view)
  *    a / d              : strafe camera left / right
+ *    j / l              : strafe camera front / back
  *    r                  : reset camera to the free overview
  *    1-9                : lock camera onto Mercury..Pluto
  *    0                  : unlock camera
@@ -353,6 +354,8 @@ typedef struct
     float x, y, z;
     float yaw, pitch;
     float fov;
+    float targetFov;
+    float velocityX, velocityZ;
 
     int locked;      /* -1 = free, else index into planets[] */
 
@@ -1373,6 +1376,9 @@ static void solarSystemInit(void)
     cam.yaw = CAM_DEFAULT_YAW;
     cam.pitch = CAM_DEFAULT_PITCH;
     cam.fov = CAM_DEFAULT_FOV;
+    cam.targetFov = CAM_DEFAULT_FOV;
+    cam.velocityX = 0.0f;
+    cam.velocityZ = 0.0f;
     cam.locked = -1;
     cam.dragging = 0;
 }
@@ -1410,6 +1416,53 @@ static void solarSetCamera(void)
               0.0, 1.0, 0.0);
 }
 
+static void solarCameraOperations(void)
+{
+    const float fovStep = 0.75f;
+    const float acceleration = 0.035f;
+    const float maxSpeed = 0.42f;
+    const float damping = 0.78f;
+    float yawRad = cam.yaw * PI / 180.0f;
+    float forwardX = cosf(yawRad);
+    float forwardZ = sinf(yawRad);
+    float rightX = -sinf(yawRad);
+    float rightZ = cosf(yawRad);
+
+    if(keyStates['w'] || keyStates['W']) cam.targetFov -= fovStep;
+    if(keyStates['s'] || keyStates['S']) cam.targetFov += fovStep;
+    if(cam.targetFov < 20.0f) cam.targetFov = 20.0f;
+    if(cam.targetFov > 90.0f) cam.targetFov = 90.0f;
+    cam.fov += (cam.targetFov - cam.fov) * 0.18f;
+
+    if(cam.locked < 0)
+    {
+        float desiredX = 0.0f;
+        float desiredZ = 0.0f;
+
+        if(keyStates['a'] || keyStates['A']) { desiredX -= rightX; desiredZ -= rightZ; }
+        if(keyStates['d'] || keyStates['D']) { desiredX += rightX; desiredZ += rightZ; }
+        if(keyStates['j'] || keyStates['J']) { desiredX += forwardX; desiredZ += forwardZ; }
+        if(keyStates['l'] || keyStates['L']) { desiredX -= forwardX; desiredZ -= forwardZ; }
+
+        cam.velocityX += desiredX * acceleration;
+        cam.velocityZ += desiredZ * acceleration;
+        if(cam.velocityX > maxSpeed) cam.velocityX = maxSpeed;
+        if(cam.velocityX < -maxSpeed) cam.velocityX = -maxSpeed;
+        if(cam.velocityZ > maxSpeed) cam.velocityZ = maxSpeed;
+        if(cam.velocityZ < -maxSpeed) cam.velocityZ = -maxSpeed;
+
+        cam.x += cam.velocityX;
+        cam.z += cam.velocityZ;
+        cam.velocityX *= damping;
+        cam.velocityZ *= damping;
+    }
+    else
+    {
+        cam.velocityX = 0.0f;
+        cam.velocityZ = 0.0f;
+    }
+}
+
 // Small 2D overlay reminding the player how to get back to the menu and
 // what the controls are. Drawn last, on top of the 3D scene, by briefly
 // switching to an orthographic projection (matching the same world used
@@ -1430,7 +1483,7 @@ static void solarHudOverlay(void)
 
     glColor3fv(colText);
     displayCenteredRasterText(0, -670, 0,
-        "drag mouse: look   w/s: zoom   a/d: strafe   1-9: lock camera   space: pause   t: rocket spin   ESC/Q: back to menu");
+        "drag: look   W/S: smooth zoom   A/D: smooth strafe   J/L: smooth front/back   1-9: lock   R: reset");
 
     glMatrixMode(GL_PROJECTION);
     glPopMatrix();
@@ -1872,38 +1925,6 @@ static void solarHandleKey(unsigned char key)
 {
     switch(key)
     {
-        case 'w':
-        case 'W':
-            cam.fov -= 2.0f;
-            if(cam.fov < 20.0f) cam.fov = 20.0f;
-            break;
-
-        case 's':
-        case 'S':
-            cam.fov += 2.0f;
-            if(cam.fov > 90.0f) cam.fov = 90.0f;
-            break;
-
-        case 'a':
-        case 'A':
-            if(cam.locked < 0)
-            {
-                float yawRad = cam.yaw * PI / 180.0f;
-                cam.x += sinf(yawRad) * 0.6f;
-                cam.z -= cosf(yawRad) * 0.6f;
-            }
-            break;
-
-        case 'd':
-        case 'D':
-            if(cam.locked < 0)
-            {
-                float yawRad = cam.yaw * PI / 180.0f;
-                cam.x -= sinf(yawRad) * 0.6f;
-                cam.z += cosf(yawRad) * 0.6f;
-            }
-            break;
-
         case 'r':
         case 'R':
             cam.x = CAM_DEFAULT_X;
@@ -1912,6 +1933,9 @@ static void solarHandleKey(unsigned char key)
             cam.yaw = CAM_DEFAULT_YAW;
             cam.pitch = CAM_DEFAULT_PITCH;
             cam.fov = CAM_DEFAULT_FOV;
+            cam.targetFov = CAM_DEFAULT_FOV;
+            cam.velocityX = 0.0f;
+            cam.velocityZ = 0.0f;
             cam.locked = -1;
             break;
 
@@ -2085,6 +2109,9 @@ void startScreenDisplay()
 		cam.yaw = CAM_DEFAULT_YAW;
 		cam.pitch = CAM_DEFAULT_PITCH;
 		cam.fov = CAM_DEFAULT_FOV;
+        cam.targetFov = CAM_DEFAULT_FOV;
+        cam.velocityX = 0.0f;
+        cam.velocityZ = 0.0f;
 		cam.locked = -1;
 	}
 	displayCenteredRasterText(0 ,225 ,0.4 ,"Solar System");
@@ -2468,6 +2495,9 @@ void keyOperations() {
 	if(keyStates[13] == true && viewPage == INTRO) {
 		viewPage = MENU;
 	}
+    if(viewPage == SOLAR) {
+        solarCameraOperations();
+    }
 	if(viewPage == GAME) {
 		laser1Dir[0] = laser1Dir[1] = false;
 		laser2Dir[0] = laser2Dir[1] = false;
